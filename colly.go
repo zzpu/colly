@@ -771,7 +771,7 @@ func (c *Collector) Fetch(u, method string, depth int, requestData io.Reader, ct
 		request.ProxyURL = proxyURL
 	}
 	if err := c.handleOnError(response, err, request, ctx); err != nil {
-		return err
+		return nil, err
 	}
 	if req.URL != origURL {
 		request.URL = req.URL
