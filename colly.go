@@ -569,9 +569,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 }
 
 func (c *Collector) Scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) (*Response, error) {
-	if err := c.requestCheck(u, method, depth, checkRevisit); err != nil {
-		return nil, err
-	}
+
 	parsedURL, err := url.Parse(u)
 	if err != nil {
 		return nil, err
