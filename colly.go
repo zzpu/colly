@@ -455,6 +455,9 @@ func (c *Collector) Head(URL string) error {
 func (c *Collector) Post(URL string, requestData map[string]string) error {
 	return c.scrape(URL, "POST", 1, createFormReader(requestData), nil, nil, true)
 }
+func (c *Collector) PostV2(URL string, requestData map[string]string) (*Response, error) {
+	return c.Scrape(URL, "POST", 1, createFormReader(requestData), nil, nil, true)
+}
 
 // PostRaw starts a collector job by creating a POST request with raw binary data.
 // Post also calls the previously provided callbacks
@@ -563,6 +566,52 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 		return nil
 	}
 	return c.fetch(u, method, depth, requestData, ctx, hdr, req)
+}
+
+func (c *Collector) Scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) (*Response, error) {
+	if err := c.requestCheck(u, method, depth, checkRevisit); err != nil {
+		return nil, err
+	}
+	parsedURL, err := url.Parse(u)
+	if err != nil {
+		return nil, err
+	}
+	if parsedURL.Scheme == "" {
+		parsedURL.Scheme = "http"
+	}
+	if !c.isDomainAllowed(parsedURL.Host) {
+		return nil, ErrForbiddenDomain
+	}
+	if method != "HEAD" && !c.IgnoreRobotsTxt {
+		if err = c.checkRobots(parsedURL); err != nil {
+			return nil, err
+		}
+	}
+	if hdr == nil {
+		hdr = http.Header{"User-Agent": []string{c.UserAgent}}
+	}
+	rc, ok := requestData.(io.ReadCloser)
+	if !ok && requestData != nil {
+		rc = ioutil.NopCloser(requestData)
+	}
+	req := &http.Request{
+		Method:     method,
+		URL:        parsedURL,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     hdr,
+		Body:       rc,
+		Host:       parsedURL.Host,
+	}
+	setRequestBody(req, requestData)
+	u = parsedURL.String()
+	c.wg.Add(1)
+	if c.Async {
+		go c.Fetch(u, method, depth, requestData, ctx, hdr, req)
+		return nil, nil
+	}
+	return c.Fetch(u, method, depth, requestData, ctx, hdr, req)
 }
 
 func setRequestBody(req *http.Request, body io.Reader) {
@@ -674,6 +723,71 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	c.handleOnScraped(response)
 
 	return err
+}
+
+func (c *Collector) Fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, req *http.Request) (*Response, error) {
+	defer c.wg.Done()
+	if ctx == nil {
+		ctx = NewContext()
+	}
+	request := &Request{
+		URL:       req.URL,
+		Headers:   &req.Header,
+		Ctx:       ctx,
+		Depth:     depth,
+		Method:    method,
+		Body:      requestData,
+		collector: c,
+		ID:        atomic.AddUint32(&c.requestCount, 1),
+	}
+
+	c.handleOnRequest(request)
+
+	if request.abort {
+		return nil, nil
+	}
+
+	if method == "POST" && req.Header.Get("Content-Type") == "" {
+		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	}
+
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "*/*")
+	}
+
+	var hTrace *HTTPTrace
+	if c.TraceHTTP {
+		hTrace = &HTTPTrace{}
+		req = hTrace.WithTrace(req)
+	}
+	checkHeadersFunc := func(statusCode int, headers http.Header) bool {
+		c.handleOnResponseHeaders(&Response{Ctx: ctx, Request: request, StatusCode: statusCode, Headers: &headers})
+		return !request.abort
+	}
+
+	origURL := req.URL
+	response, err := c.backend.Cache(req, c.MaxBodySize, checkHeadersFunc, c.CacheDir)
+	if proxyURL, ok := req.Context().Value(ProxyURLKey).(string); ok {
+		request.ProxyURL = proxyURL
+	}
+	if err := c.handleOnError(response, err, request, ctx); err != nil {
+		return err
+	}
+	if req.URL != origURL {
+		request.URL = req.URL
+		request.Headers = &req.Header
+	}
+	atomic.AddUint32(&c.responseCount, 1)
+	response.Ctx = ctx
+	response.Request = request
+	response.Trace = hTrace
+
+	err = response.fixCharset(c.DetectCharset, request.ResponseCharacterEncoding)
+	if err != nil {
+		return nil, err
+	}
+
+	return response, err
 }
 
 func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, depth int, checkRevisit bool) error {
