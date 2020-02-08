@@ -1,4 +1,4 @@
-module github.com/gocolly/colly/v2
+module github.com/zzpu/colly/v3
 
 go 1.12
 
